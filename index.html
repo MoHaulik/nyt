@@ -1,1 +1,838 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Crystal Runner - WebXR Game</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <style>
+    body { 
+      margin: 0; 
+      overflow: hidden;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+    }
+    #overlay {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      z-index: 1;
+    }
+    #start-button {
+      padding: 14px 28px;
+      font-size: 20px;
+      background: linear-gradient(135deg, rgba(72, 118, 255, 0.8), rgba(100, 80, 255, 0.9));
+      color: white;
+      border: none;
+      border-radius: 30px;
+      box-shadow: 0 4px 15px rgba(72, 118, 255, 0.5), 0 0 20px rgba(72, 118, 255, 0.3);
+      cursor: pointer;
+      transition: all 0.3s ease;
+      text-shadow: 0 1px 2px rgba(0,0,0,0.2);
+    }
+    #start-button:hover {
+      transform: translateY(-3px) scale(1.03);
+      box-shadow: 0 6px 20px rgba(72, 118, 255, 0.6), 0 0 30px rgba(72, 118, 255, 0.4);
+    }
+    #status {
+      margin-top: 15px;
+      font-size: 16px;
+      background: rgba(10, 20, 30, 0.6);
+      color: white;
+      padding: 12px 18px;
+      border-radius: 12px;
+      display: none;
+      backdrop-filter: blur(8px);
+      box-shadow: 0 4px 10px rgba(0,0,0,0.2), inset 0 0 10px rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    #score-display {
+      position: absolute;
+      top: 80px;
+      left: 20px;
+      z-index: 1;
+      font-size: 28px;
+      font-weight: bold;
+      color: white;
+      background: rgba(10, 20, 30, 0.6);
+      padding: 12px 18px;
+      border-radius: 12px;
+      display: none;
+      backdrop-filter: blur(8px);
+      box-shadow: 0 4px 10px rgba(0,0,0,0.2), inset 0 0 10px rgba(255,255,255,0.1);
+      text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <button id="start-button">Start Crystal Runner</button>
+    <div id="status"></div>
+  </div>
+  <div id="score-display">Score: 0</div>
+  
+  <script type="module">
+    import * as THREE from 'https://unpkg.com/three@0.150.1/build/three.module.js';
 
+    let camera, scene, renderer;
+    let controller;
+    let player;
+    let ground;
+    let particles = [];
+    let obstacles = [];
+    let clock = new THREE.Clock();
+    let isPlaying = false;
+    let playerLane = 1;
+    let lanePositions = [-0.4, 0, 0.4];
+    let lastControllerRotation = new THREE.Euler();
+    let score = 0;
+    let gameSpeed = 2.0;
+    let spawnInterval = 2.0;
+    let lastSpawnTime = 0;
+    let backgroundMusic;
+    let bubbleTexture;
+    let bubbleEnvMap;
+    
+    const crystalColors = [
+      0x84f7fd,
+      0x64acff,
+      0xa864ff,
+      0x45caff
+    ];
+    
+    let envObjects = [];
+    let trailParticles = [];
+    
+    init();
+
+    function init() {
+      scene = new THREE.Scene();
+      scene.fog = new THREE.FogExp2(0x002255, 0.08);
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      renderer.setClearColor(0x000000, 0);
+      renderer.outputEncoding = THREE.sRGBEncoding;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.2;
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      document.body.appendChild(renderer.domElement);
+
+      // Create environment map for soap bubble reflections
+      createEnvironmentMap();
+
+      // Load background music
+      backgroundMusic = new Audio('Gentlelane.mp3');
+      backgroundMusic.loop = true;
+
+      const ambientLight = new THREE.AmbientLight(0x404040, 2);
+      scene.add(ambientLight);
+
+      const directionalLight = new THREE.DirectionalLight(0xffffff, 1.8);
+      directionalLight.position.set(1, 1.5, 1);
+      directionalLight.castShadow = true;
+      directionalLight.shadow.mapSize.set(1024, 1024);
+      directionalLight.shadow.camera.near = 0.1;
+      directionalLight.shadow.camera.far = 20;
+      scene.add(directionalLight);
+      
+      const pointLight1 = new THREE.PointLight(0x64acff, 2, 5);
+      pointLight1.position.set(0, 0.5, -3);
+      scene.add(pointLight1);
+      
+      const pointLight2 = new THREE.PointLight(0xa864ff, 2, 5);
+      pointLight2.position.set(0.5, 0.5, -7);
+      scene.add(pointLight2);
+
+      document.getElementById('start-button').addEventListener('click', startARSession);
+      window.addEventListener('resize', onWindowResize);
+    }
+
+    function createEnvironmentMap() {
+      // Create a procedural environment map to enhance bubble reflections
+      const cubeRenderTarget = new THREE.WebGLCubeRenderTarget(256, {
+        format: THREE.RGBFormat,
+        generateMipmaps: true,
+        minFilter: THREE.LinearMipmapLinearFilter
+      });
+      
+      const cubeCamera = new THREE.CubeCamera(0.1, 10, cubeRenderTarget);
+      scene.add(cubeCamera);
+      
+      // Create a simple environment to be reflected
+      const envScene = new THREE.Scene();
+      envScene.background = new THREE.Color(0x88ccff);
+      
+      // Add gradient sky
+      const skyGeo = new THREE.SphereGeometry(5, 32, 32);
+      const skyMat = new THREE.ShaderMaterial({
+        uniforms: {
+          topColor: { value: new THREE.Color(0x0077ff) },
+          bottomColor: { value: new THREE.Color(0xffffff) }
+        },
+        vertexShader: `
+          varying vec3 vWorldPosition;
+          void main() {
+            vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+            vWorldPosition = worldPosition.xyz;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform vec3 topColor;
+          uniform vec3 bottomColor;
+          varying vec3 vWorldPosition;
+          void main() {
+            float h = normalize(vWorldPosition).y;
+            gl_FragColor = vec4(mix(bottomColor, topColor, max(0.0, h)), 1.0);
+          }
+        `,
+        side: THREE.BackSide
+      });
+      
+      const sky = new THREE.Mesh(skyGeo, skyMat);
+      envScene.add(sky);
+      
+      // Add a few colored lights to reflect in the bubble
+      const envLights = [
+        { color: 0xff8800, pos: [1, 0.5, 1], intensity: 2 },
+        { color: 0x0088ff, pos: [-1, 0.2, 0.5], intensity: 2 },
+        { color: 0xff0088, pos: [0, 1, -1], intensity: 1.5 }
+      ];
+      
+      envLights.forEach(light => {
+        const pointLight = new THREE.PointLight(light.color, light.intensity, 10);
+        pointLight.position.set(...light.pos);
+        envScene.add(pointLight);
+      });
+      
+      // Render the environment map
+      cubeCamera.update(renderer, envScene);
+      
+      // Store the environment map for later use
+      bubbleEnvMap = cubeRenderTarget.texture;
+    }
+
+    function startARSession() {
+      if (navigator.xr) {
+        navigator.xr.isSessionSupported('immersive-ar').then(supported => {
+          if (supported) {
+            const sessionInit = {
+              requiredFeatures: ['hit-test'],
+              optionalFeatures: ['dom-overlay'],
+              domOverlay: { root: document.body }
+            };
+            navigator.xr.requestSession('immersive-ar', sessionInit).then(onSessionStarted);
+          } else {
+            updateStatus('WebXR AR session is not supported on this device.');
+          }
+        });
+      } else {
+        updateStatus('WebXR is not supported in this browser.');
+      }
+    }
+
+    function updateStatus(message) {
+      const el = document.getElementById('status');
+      el.style.display = 'block';
+      el.textContent = message;
+    }
+
+    function updateScore(newScore) {
+      score = newScore;
+      const el = document.getElementById('score-display');
+      el.style.display = 'block';
+      el.textContent = `Score: ${score}`;
+    }
+
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function onSessionStarted(session) {
+      renderer.xr.setReferenceSpaceType('local');
+      renderer.xr.setSession(session);
+      document.getElementById('start-button').style.display = 'none';
+      updateStatus('Creating crystal world...');
+      updateScore(0);
+
+      // Start playing background music
+      backgroundMusic.play().catch(e => {
+        console.warn("Audio couldn't autoplay:", e);
+        // Many browsers require user interaction before playing audio
+        document.addEventListener('click', () => {
+          backgroundMusic.play();
+        }, { once: true });
+      });
+
+      createGameEnvironment();
+      createPlayer();
+      createParticleSystem();
+      setupController(session);
+
+      renderer.setAnimationLoop(render);
+      session.addEventListener('end', onSessionEnd);
+
+      isPlaying = true;
+      updateStatus('Rotate controller to change lanes!');
+    }
+
+    function onSessionEnd() {
+      isPlaying = false;
+      updateStatus('Game ended');
+      document.getElementById('start-button').style.display = 'block';
+      document.getElementById('score-display').style.display = 'none';
+      
+      // Stop background music
+      backgroundMusic.pause();
+      backgroundMusic.currentTime = 0;
+
+      if (player) scene.remove(player);
+      if (ground) scene.remove(ground);
+      obstacles.forEach(o => scene.remove(o));
+      obstacles = [];
+      envObjects.forEach(o => scene.remove(o));
+      envObjects = [];
+      particles.forEach(p => scene.remove(p));
+      particles = [];
+      trailParticles.forEach(p => scene.remove(p));
+      trailParticles = [];
+    }
+
+    function createGameEnvironment() {
+      const gGeom = new THREE.BoxGeometry(1.5, 0.02, 10);
+      const gMat = new THREE.MeshPhysicalMaterial({
+        color: 0x203a55,
+        roughness: 0.2,
+        metalness: 0.3,
+        transmission: 0.3,
+        thickness: 0.5,
+        clearcoat: 1.0,
+        clearcoatRoughness: 0.1,
+        envMapIntensity: 1.5
+      });
+      ground = new THREE.Mesh(gGeom, gMat);
+      ground.position.set(0, -0.1, -5);
+      ground.receiveShadow = true;
+      scene.add(ground);
+      envObjects.push(ground);
+
+      for (let i = 0; i < 3; i++) {
+        const lm = new THREE.Mesh(
+          new THREE.BoxGeometry(0.03, 0.03, 10),
+          new THREE.MeshPhysicalMaterial({
+            color: 0xffffff,
+            emissive: 0x3a70ff,
+            emissiveIntensity: 0.5,
+            roughness: 0.2,
+            metalness: 0.8,
+            transmission: 0.9,
+            clearcoat: 1.0
+          })
+        );
+        lm.position.set((i - 1) * 0.4, -0.08, -5);
+        scene.add(lm);
+        envObjects.push(lm);
+      }
+
+      for (let i = 0; i < 16; i++) {
+        const size = 0.03 + Math.random()*0.06;
+        const color = crystalColors[Math.floor(Math.random()*crystalColors.length)];
+        const crys = createCrystalMesh(size, color);
+        const side = Math.random()>0.5?1:-1;
+        crys.position.set(side*0.6 + (Math.random()*0.2*side), -0.08 + size/2, -2 - i*0.6);
+        crys.rotation.y = Math.random()*Math.PI*2;
+        crys.rotation.z = Math.random()*0.3;
+        scene.add(crys);
+        envObjects.push(crys);
+      }
+    }
+
+    function createCrystalMesh(size, color) {
+      const geom = new THREE.IcosahedronGeometry(size, 0);
+      const mat = new THREE.MeshPhysicalMaterial({
+        color,
+        roughness: 0.1,
+        metalness: 0.2,
+        transmission: 0.8,
+        thickness: size*2,
+        clearcoat: 1.0,
+        clearcoatRoughness: 0.1,
+        envMapIntensity: 1.5,
+        emissive: color,
+        emissiveIntensity: 0.3
+      });
+      const mesh = new THREE.Mesh(geom, mat);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      return mesh;
+    }
+
+    function createPlayer() {
+      const grp = new THREE.Group();
+      
+      // Create procedural soap bubble texture
+      bubbleTexture = createBubbleTexture();
+      
+      // More detailed sphere geometry for better reflections
+      const geom = new THREE.SphereGeometry(0.12, 64, 64);
+      
+      // Create soap bubble material with enhanced properties
+      const mat = new THREE.MeshPhysicalMaterial({
+        color: 0xffffff,
+        metalness: 0,
+        roughness: 0,
+        transparent: true,
+        opacity: 0.75,
+        transmission: 0.98,
+        thickness: 0.005,        // Very thin for soap bubble
+        ior: 1.4,                // Refractive index close to soap solution
+        clearcoat: 1.0,
+        clearcoatRoughness: 0,
+        envMap: bubbleEnvMap,    // Apply our environment map
+        envMapIntensity: 1.0,
+        iridescence: 1.0,        // Maximum iridescence for soap film effect
+        iridescenceIOR: 1.3,     // Oil-film like effect
+        iridescenceThicknessRange: [100, 400], // Thin film interference range
+        side: THREE.DoubleSide,  // Render both inside and outside
+        premultipliedAlpha: true // Improves transparency rendering
+      });
+      
+      // Apply our bubble texture to the material
+      mat.map = bubbleTexture;
+      
+      const mesh = new THREE.Mesh(geom, mat);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      grp.add(mesh);
+      
+      // Add inner bubble to create the double-layer soap film effect
+      const innerMesh = new THREE.Mesh(
+        new THREE.SphereGeometry(0.118, 64, 64),
+        new THREE.MeshPhysicalMaterial({
+          color: 0xffffff,
+          metalness: 0,
+          roughness: 0,
+          transparent: true,
+          opacity: 0.5,
+          transmission: 0.99,
+          thickness: 0.001,      // Even thinner for inner layer
+          ior: 1.2,
+          envMap: bubbleEnvMap,
+          envMapIntensity: 0.8,
+          side: THREE.BackSide,  // Render only from inside
+          premultipliedAlpha: true
+        })
+      );
+      grp.add(innerMesh);
+      
+      // Rainbow colored point light for the bubble interior
+      const bubbleLight = new THREE.PointLight(0xffffff, 0.8, 0.5);
+      grp.add(bubbleLight);
+      
+      grp.position.set(lanePositions[playerLane], 0, -1);
+      player = grp;
+      scene.add(player);
+    }
+
+    function createBubbleTexture() {
+      // Create a canvas for procedural bubble texture
+      const canvas = document.createElement('canvas');
+      canvas.width = 512;
+      canvas.height = 512;
+      const ctx = canvas.getContext('2d');
+      
+      // Fill with transparent base
+      ctx.fillStyle = 'rgba(255,255,255,0.0)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      
+      // Create subtle soap patterns
+      for (let i = 0; i < 20; i++) {
+        const gradient = ctx.createRadialGradient(
+          Math.random() * canvas.width,
+          Math.random() * canvas.height,
+          0,
+          Math.random() * canvas.width,
+          Math.random() * canvas.height,
+          Math.random() * 150 + 50
+        );
+        
+        // Subtle rainbow colors for soap film interference patterns
+        const hue = Math.random() * 360;
+        gradient.addColorStop(0, `hsla(${hue}, 100%, 80%, 0.05)`);
+        gradient.addColorStop(0.5, `hsla(${(hue + 40) % 360}, 100%, 70%, 0.03)`);
+        gradient.addColorStop(1, `hsla(${(hue + 80) % 360}, 100%, 90%, 0)`);
+        
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+      
+      // Convert canvas to texture
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.needsUpdate = true;
+      return texture;
+    }
+
+    function createParticleSystem() {
+      for (let i = 0; i < 50; i++) {
+        const p = new THREE.Mesh(
+          new THREE.SphereGeometry(0.01 + Math.random()*0.02, 8, 8),
+          new THREE.MeshBasicMaterial({
+            color: crystalColors[Math.floor(Math.random()*crystalColors.length)],
+            transparent: true,
+            opacity: 0.6
+          })
+        );
+        p.position.set((Math.random()-0.5)*2, Math.random()*0.5, -Math.random()*10);
+        scene.add(p);
+        particles.push(p);
+      }
+    }
+
+    function setupController(session) {
+      controller = renderer.xr.getController(0);
+      controller.addEventListener('connected', e => updateStatus(`Controller connected: ${e.data.handedness}. Rotate to change lanes!`));
+      scene.add(controller);
+      const cg = new THREE.Group();
+      const geom = new THREE.CylinderGeometry(0.01, 0.02, 0.1, 16);
+      const mat = new THREE.MeshPhysicalMaterial({
+        color: 0xff4500,
+        roughness: 0.2,
+        metalness: 0.7,
+        clearcoat: 1.0,
+        emissive: 0xff2000,
+        emissiveIntensity: 0.3
+      });
+      const cm = new THREE.Mesh(geom, mat);
+      cm.rotation.x = Math.PI/2;
+      cg.add(cm);
+      cg.add(new THREE.PointLight(0xff4500, 1.5, 0.3));
+      controller.add(cg);
+    }
+
+    function spawnObstacle() {
+      const lane = Math.floor(Math.random()*3);
+      const grp = new THREE.Group();
+      const color = crystalColors[Math.floor(Math.random()*crystalColors.length)];
+      const mat = new THREE.MeshPhysicalMaterial({
+        color,
+        roughness: 0.1,
+        metalness: 0.2,
+        transmission: 0.8,
+        thickness: 0.5,
+        clearcoat: 1.0,
+        clearcoatRoughness: 0.1,
+        envMapIntensity: 1.5,
+        emissive: color,
+        emissiveIntensity: 0.4
+      });
+      const mesh = new THREE.Mesh(new THREE.OctahedronGeometry(0.15, 0), mat);
+      mesh.castShadow = true;
+      grp.add(mesh);
+      grp.add(new THREE.PointLight(color, 1.5, 0.4));
+      grp.position.set(lanePositions[lane], 0, -10);
+      grp.userData = { isObstacle: true, lane };
+      scene.add(grp);
+      obstacles.push(grp);
+    }
+
+    function checkCollisions() {
+      for (let i = obstacles.length-1; i>=0; i--) {
+        const o = obstacles[i];
+        if (player.position.distanceTo(o.position) < 0.25) {
+          updateStatus('Collision! Game over.');
+          isPlaying = false;
+          createExplosionEffect(player.position);
+          const pm = player.children[0].material;
+          pm.opacity = 0.3;
+          pm.emissive.set(0xff0000);
+          pm.emissiveIntensity = 0.2;
+          setTimeout(resetGame, 2000);
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function createExplosionEffect(pos) {
+      // Enhanced water splash effect for bubble popping
+      for (let i=0; i<30; i++) {
+        const size = 0.01 + Math.random() * 0.015;
+        const p = new THREE.Mesh(
+          new THREE.SphereGeometry(size, 8, 8),
+          new THREE.MeshPhysicalMaterial({ 
+            color: 0x84f7fd, 
+            transparent: true, 
+            opacity: 0.9,
+            transmission: 0.9,
+            ior: 1.4,
+            thickness: 0.02,
+            envMap: bubbleEnvMap,
+            envMapIntensity: 0.8
+          })
+        );
+        p.position.copy(pos);
+        p.userData = {
+          velocity: new THREE.Vector3(
+            (Math.random()-0.5)*0.15, 
+            (Math.random()-0.5)*0.15, 
+            (Math.random()-0.5)*0.15
+          ),
+          life: 1.0,
+          initialSize: size
+        };
+        scene.add(p);
+        trailParticles.push(p);
+      }
+      
+      // Add tiny droplets
+      for (let i=0; i<20; i++) {
+        const p = new THREE.Mesh(
+          new THREE.SphereGeometry(0.005, 8, 8),
+          new THREE.MeshPhysicalMaterial({ 
+            color: 0xffffff, 
+            transparent: true, 
+            opacity: 0.7,
+            transmission: 0.95
+          })
+        );
+        p.position.copy(pos);
+        p.userData = {
+          velocity: new THREE.Vector3(
+            (Math.random()-0.5)*0.2, 
+            (Math.random()*0.15), 
+            (Math.random()-0.5)*0.2
+          ),
+          life: 0.8,
+          gravity: 0.003 + Math.random() * 0.002
+        };
+        scene.add(p);
+        trailParticles.push(p);
+      }
+      
+      const flash = new THREE.PointLight(0x84f7fd, 3, 1.5);
+      flash.position.copy(pos);
+      scene.add(flash);
+      setTimeout(() => scene.remove(flash), 200);
+    }
+
+    function resetGame() {
+      updateScore(0);
+      playerLane = 1;
+      gameSpeed = 2.0;
+      isPlaying = true;
+      player.position.set(lanePositions[playerLane], 0, -1);
+      const pm = player.children[0].material;
+      pm.opacity = 0.75;
+      pm.emissive.set(0xffffff);
+      pm.emissiveIntensity = 0.2;
+      obstacles.forEach(o=>scene.remove(o));
+      obstacles=[];
+      trailParticles.forEach(p=>scene.remove(p));
+      trailParticles=[];
+      updateStatus('Game restarted! Rotate controller to change lanes.');
+    }
+
+    function handleControllerRotation() {
+      if (!controller || !isPlaying) return;
+      const rot = new THREE.Euler().setFromQuaternion(controller.quaternion);
+      const d = rot.z - lastControllerRotation.z;
+      if (Math.abs(d)>0.1) {
+        playerLane = d>0?Math.min(playerLane+1,2):Math.max(playerLane-1,0);
+        updateStatus(`Changed to ${['left','center','right'][playerLane]} lane`);
+        createTrailEffect(player.position,10);
+      }
+      const tx = lanePositions[playerLane];
+      player.position.x += (tx-player.position.x)*0.2;
+      player.position.y = Math.sin(clock.getElapsedTime()*3)*0.02;
+      player.rotation.y += (tx-player.position.x)*0.1 + dt*0.5;
+      player.rotation.z = (tx-player.position.x)*0.3;
+      
+      // Make the bubble wobble and distort more realistically
+      const wobbleTime = clock.getElapsedTime();
+      const wobbleScaleX = 1.0 + Math.sin(wobbleTime*3.5)*0.03 + Math.sin(wobbleTime*5.2)*0.02;
+      const wobbleScaleY = 1.0 + Math.sin(wobbleTime*4.3 + 0.5)*0.025 + Math.sin(wobbleTime*6.1)*0.015;
+      const wobbleScaleZ = 1.0 + Math.sin(wobbleTime*3.8 + 1.0)*0.03 + Math.sin(wobbleTime*5.7)*0.02;
+      
+      player.scale.set(wobbleScaleX, wobbleScaleY, wobbleScaleZ);
+      
+      // Update inner bubble with slight delay for realism
+      if (player.children.length > 1) {
+        const innerBubble = player.children[1];
+        innerBubble.scale.set(
+          1.0 + Math.sin((wobbleTime-0.1)*3.5)*0.025,
+          1.0 + Math.sin((wobbleTime-0.1)*4.3 + 0.5)*0.02,
+          1.0 + Math.sin((wobbleTime-0.1)*3.8 + 1.0)*0.025
+        );
+      }
+      
+      // Make bubble rotate slightly for better environment map reflections
+      player.rotation.x = Math.sin(wobbleTime * 0.7) * 0.05;
+      player.rotation.y += dt * 0.2;
+      
+      lastControllerRotation.copy(rot);
+    }
+
+    function createTrailEffect(pos, count) {
+      // Create enhanced shimmery bubble trail
+      for (let i=0; i<count; i++) {
+        const size = 0.005 + Math.random() * 0.015;
+        const hue = Math.random();
+        const color = new THREE.Color().setHSL(hue, 0.9, 0.7);
+        
+        const p = new THREE.Mesh(
+          new THREE.SphereGeometry(size, 8, 8),
+          new THREE.MeshPhysicalMaterial({
+            color: color,
+            transparent: true,
+            opacity: 0.6,
+            transmission: 0.9,
+            ior: 1.4,
+            thickness: 0.01,
+            envMap: bubbleEnvMap,
+            envMapIntensity: 0.5
+          })
+        );
+        
+        p.position.copy(pos);
+        p.position.x += (Math.random()-0.5)*0.08;
+        p.position.y += (Math.random()-0.3)*0.08; // More bubbles going up
+        p.position.z += (Math.random()-0.5)*0.08;
+        p.userData = {
+          velocity: new THREE.Vector3(
+            (Math.random()-0.5)*0.03, 
+            Math.random()*0.03 + 0.01, // Slight upward drift
+            (Math.random()-0.5)*0.03
+          ),
+          life: 0.7+Math.random()*0.4,
+          hue: hue,
+          rotationSpeed: (Math.random()-0.5)*0.1
+        };
+        scene.add(p);
+        trailParticles.push(p);
+      }
+    }
+
+    function updateObstacles(dt) {
+      for (let i=obstacles.length-1; i>=0; i--) {
+        const o = obstacles[i];
+        o.position.z += gameSpeed*dt;
+        o.rotation.x += dt*0.5;
+        o.rotation.y += dt*0.8;
+        if (o.position.z>0) {
+          scene.remove(o);
+          obstacles.splice(i,1);
+          updateScore(score+10);
+          gameSpeed += 0.05;
+          const flash = new THREE.PointLight(0x00ff00,1,1);
+          flash.position.set(o.position.x,o.position.y,0);
+          scene.add(flash);
+          setTimeout(() => scene.remove(flash),300);
+        }
+      }
+      if (clock.getElapsedTime() - lastSpawnTime > spawnInterval) {
+        spawnObstacle();
+        lastSpawnTime = clock.getElapsedTime();
+        spawnInterval = Math.max(0.8, spawnInterval - 0.05);
+      }
+    }
+
+    function updateParticles(dt) {
+      particles.forEach(p => {
+        p.position.y -= dt*0.2;
+        if (p.position.y < -0.2) {
+          p.position.y = 0.5;
+          p.position.z = -Math.random()*10;
+          p.position.x = (Math.random()-0.5)*2;
+        }
+      });
+      
+      for (let i=trailParticles.length-1; i>=0; i--) {
+        const p = trailParticles[i];
+        p.position.add(p.userData.velocity);
+        
+        // Apply gravity to droplets if they have it
+        if (p.userData.gravity) {
+          p.userData.velocity.y -= p.userData.gravity;
+        }
+        
+        // Update life and handle particle aging
+        p.userData.life -= dt;
+        
+        if (p.userData.life > 0) {
+          // Animate bubble trail color and opacity
+          if (p.userData.hue !== undefined) {
+            // Shift the hue slightly for rainbow effect
+            p.userData.hue = (p.userData.hue + dt * 0.1) % 1.0;
+            p.material.color.setHSL(p.userData.hue, 0.9, 0.7);
+          }
+          
+          // Update opacity based on remaining life
+          p.material.opacity = p.userData.life * 0.7;
+          
+          // Handle rotation for more natural movement
+          if (p.userData.rotationSpeed) {
+            p.rotation.x += p.userData.rotationSpeed * dt;
+            p.rotation.y += p.userData.rotationSpeed * dt * 0.8;
+            p.rotation.z += p.userData.rotationSpeed * dt * 0.6;
+          }
+          
+          // Scale down as life decreases for bubble pop effect
+          if (p.userData.initialSize) {
+            const lifeRatio = p.userData.life / 1.0;
+            const newScale = Math.max(0.1, lifeRatio) * p.userData.initialSize / 0.01;
+            p.scale.set(newScale, newScale, newScale);
+          }
+        } else {
+          scene.remove(p);
+          trailParticles.splice(i,1);
+        }
+      }
+      
+      // Update bubble light color to create rainbow effect
+      if (player && player.children.length > 2) {
+        const bubbleLight = player.children[2];
+        const hue = (clock.getElapsedTime() * 0.2) % 1;
+        const color = new THREE.Color().setHSL(hue, 0.7, 0.5);
+        bubbleLight.color = color;
+        
+        // Make the inner bubble's material subtly change color
+        if (player.children.length > 1) {
+          const innerBubble = player.children[1];
+          innerBubble.material.color.setHSL((hue + 0.2) % 1, 0.3, 0.8);
+        }
+      }
+    }
+
+    let dt;
+    function render(time, frame) {
+      dt = clock.getDelta();
+      if (frame && isPlaying) {
+        handleControllerRotation();
+        updateObstacles(dt);
+        updateParticles(dt);
+        
+        // Generate small bubble trail continuously
+        if (Math.random() < 0.05) createTrailEffect(player.position, 1);
+        
+        // Update bubble surface animation
+        if (player && bubbleTexture) {
+          // Slowly rotate the texture for subtle soap film movement
+          bubbleTexture.offset.x += dt * 0.02;
+          bubbleTexture.offset.y += dt * 0.01;
+        }
+        
+        checkCollisions();
+      }
+      renderer.render(scene, camera);
+    }
+  </script>
+</body>
+</html>
